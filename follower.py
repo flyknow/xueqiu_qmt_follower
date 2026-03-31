@@ -9,6 +9,7 @@ follower.py
   3. 与本地 QMT 账户实际持仓对比，计算目标市值差值
   4. 执行风控校验后精确调仓，使持仓比例与雪球一致
   5. 兼容旧版 fixed_amount 模式
+  6. 撤单同步：雪球在非交易时间撤单，QMT 同步撤销对应未成交委托
 
 ────────────────────────────────────────────────────────────
 【ratio_follow 模式说明】
@@ -19,6 +20,15 @@ follower.py
   |差值/目标市值| < REBALANCE_THRESHOLD  → 忽略（避免微小抖动）
 
   卖出先于买入执行，确保有足够资金。
+
+────────────────────────────────────────────────────────────
+【撤单同步说明】
+
+  场景：雪球组合在非交易时间下单，后来撤单（调仓内容回退）。
+  检测方式：
+    - 每次再平衡前，先检查 QMT 是否存在该股票的挂单
+    - 若存在，先撤单，再重新根据最新目标持仓下单
+  此外，在非交易时段也会定期检查是否有 QMT 悬挂委托需要清理。
 ────────────────────────────────────────────────────────────
 """
 
@@ -102,6 +112,12 @@ class XueqiuFollower:
         self._last_rebalancing_id: Optional[int] = None
         self._last_reset_date: Optional[str] = None
 
+        # 上一次的目标持仓快照（用于非交易时间撤单检测）
+        # { stock_code: target_weight }
+        self._last_target_weights: Dict[str, float] = {}
+        # 非交易时间撤单检查时间戳
+        self._last_offhour_cancel_ts: float = 0.0
+
     # ─────────────────────────────────────────────────────────
     # 启动入口
     # ─────────────────────────────────────────────────────────
@@ -149,6 +165,8 @@ class XueqiuFollower:
                 if _is_auction_time() and config.ALLOW_AUCTION:
                     pass
                 else:
+                    # ── 非交易时间：检查雪球是否有撤单/调仓变化 ──
+                    self._check_offhour_cancel()
                     time.sleep(30)
                     continue
 
@@ -178,6 +196,115 @@ class XueqiuFollower:
         return False
 
     # ─────────────────────────────────────────────────────────
+    # 非交易时间：检测雪球调仓变化并同步撤单
+    # ─────────────────────────────────────────────────────────
+    _offhour_cancel_interval = 60   # 非交易时间每 60 秒检查一次
+
+    def _check_offhour_cancel(self):
+        """
+        非交易时间定期检测：
+          1. 拉取雪球最新调仓 ID
+          2. 若 ID 有变化（雪球撤单或重新调仓），立即撤销 QMT 所有未成交委托
+          3. 更新本地目标持仓快照（供下次比较）
+
+        说明：非交易时间不重新下单，只撤单。
+        等到下一个交易时间开启后，再平衡逻辑会自动重新计算并下单。
+        """
+        now_ts = time.time()
+        if now_ts - self._last_offhour_cancel_ts < self._offhour_cancel_interval:
+            return
+        self._last_offhour_cancel_ts = now_ts
+
+        rebalancing = self.xq.get_latest_rebalancing()
+        if rebalancing is None:
+            return
+
+        rid = rebalancing.get("id")
+
+        # 检查调仓 ID 是否变化
+        if rid and rid != self._last_rebalancing_id:
+            logger.info(
+                f"【非交易时段】检测到雪球调仓变化 "
+                f"old_id={self._last_rebalancing_id} → new_id={rid}，"
+                f"撤销 QMT 全部未成交委托..."
+            )
+            self._last_rebalancing_id = rid
+            self._cancel_all_pending_with_log()
+            return
+
+        # 即使 ID 未变，也检查是否有悬挂的 QMT 委托（程序重启后可能残留）
+        # 对比当前雪球持仓与 QMT 挂单，若挂单方向与目标不符则撤销
+        self._cancel_mismatched_pending_orders()
+
+    def _cancel_all_pending_with_log(self):
+        """撤销 QMT 所有未成交委托，并记录日志"""
+        pending = self.trader.get_pending_orders()
+        if not pending:
+            logger.info("【撤单同步】QMT 无未成交委托，无需撤单")
+            return
+        logger.info(f"【撤单同步】发现 {len(pending)} 笔未成交委托，开始撤单...")
+        for o in pending:
+            logger.info(
+                f"  撤单: {o['stock_code']} "
+                f"{o['order_type']} {o['order_volume']}股 @ {o['price']:.3f} "
+                f"order_id={o['order_id']}"
+            )
+        self.trader.cancel_all_pending()
+        logger.info("【撤单同步】撤单完成")
+
+    def _cancel_mismatched_pending_orders(self):
+        """
+        检查 QMT 挂单与当前雪球目标持仓是否一致：
+          - 若某只股票的 QMT 挂单方向与目标方向不一致，则撤单
+          - 若某只股票在目标持仓中已不存在（权重=0），但 QMT 有买单，则撤单
+        """
+        pending = self.trader.get_pending_orders()
+        if not pending:
+            return
+
+        # 获取最新雪球持仓目标
+        xq_positions = self.xq.get_current_positions()
+        if not xq_positions:
+            return
+
+        total_weight = sum(p["weight"] for p in xq_positions)
+        target_weights: Dict[str, float] = {}
+        if total_weight > 0:
+            for p in xq_positions:
+                target_weights[p["stock_code"]] = p["weight"] / total_weight
+
+        # 获取 QMT 当前持仓
+        qmt_positions = self.trader.get_positions()
+        total_amount = getattr(config, "TOTAL_AMOUNT", 100000.0)
+
+        cancel_ids = []
+        for o in pending:
+            code = o["stock_code"]
+            target_w = target_weights.get(code, 0.0)
+            target_value = total_amount * target_w
+            cur_value = float((qmt_positions.get(code) or {}).get("market_value") or 0)
+
+            if o["order_type"] == "BUY":
+                # 买单：若目标已不需要买（目标<=当前），则撤
+                if target_value <= cur_value:
+                    logger.info(
+                        f"【撤单同步】{code} 买单已无需执行"
+                        f"（目标市值={target_value:.0f} <= 当前市值={cur_value:.0f}），撤单 order_id={o['order_id']}"
+                    )
+                    cancel_ids.append(o["order_id"])
+            elif o["order_type"] == "SELL":
+                # 卖单：若目标已不需要卖（目标>=当前），则撤
+                if target_value >= cur_value and target_w > 0:
+                    logger.info(
+                        f"【撤单同步】{code} 卖单已无需执行"
+                        f"（目标市值={target_value:.0f} >= 当前市值={cur_value:.0f}），撤单 order_id={o['order_id']}"
+                    )
+                    cancel_ids.append(o["order_id"])
+
+        for oid in cancel_ids:
+            self.trader.cancel_order(oid)
+
+    # ─────────────────────────────────────────────────────────
     # 处理调仓（入口）
     # ─────────────────────────────────────────────────────────
     def _handle_rebalancing(self):
@@ -194,6 +321,17 @@ class XueqiuFollower:
 
         logger.info(f"发现新调仓！ID={rid}")
         self._last_rebalancing_id = rid
+
+        # ── 先撤销 QMT 所有未成交委托（防止旧挂单干扰再平衡计算）──
+        pending = self.trader.get_pending_orders()
+        if pending:
+            logger.info(
+                f"【再平衡前撤单】发现 {len(pending)} 笔未成交挂单，"
+                f"先全部撤销再重新计算..."
+            )
+            self.trader.cancel_all_pending()
+            # 等待撤单回报落地（最多等 2 秒）
+            time.sleep(2)
 
         mode = getattr(config, "TRADE_MODE", "ratio_follow")
         if mode == "ratio_follow":
@@ -277,12 +415,8 @@ class XueqiuFollower:
 
             logger.info(f"  {code:<12} {tgt:>10,.0f} {cur:>10,.0f} {diff:>+10,.0f}  {action}")
 
-        # 不在雪球持仓内、但本地有持仓的股票 → 全部清仓（排除511880）
+        # 不在雪球持仓内、但本地有持仓的股票 → 全部清仓
         for code in set(current_value.keys()) - set(target.keys()):
-            # 排除511880股票不清仓
-            if code == "511880.SH":
-                logger.info(f"  {code:<12} {'0':>10} {current_value[code]:>10,.0f} {0:>+10,.0f}  保留（排除清仓）")
-                continue
             cur = current_value[code]
             if cur > 0:
                 logger.info(f"  {code:<12} {'0':>10} {cur:>10,.0f} {-cur:>+10,.0f}  清仓（已从组合移除）")
@@ -301,9 +435,15 @@ class XueqiuFollower:
     # ratio_follow：按目标金额买入
     # ─────────────────────────────────────────────────────────
     def _execute_buy_by_value(self, code: str, amount: float):
-        """买入指定金额的股票"""
+        """买入指定金额的股票（下单前先撤该股旧挂单）"""
         if not self._risk_check_buy(code, amount):
             return
+
+        # 先撤该股票的旧挂单，避免重复或冲突
+        cancelled = self.trader.cancel_orders_for_stock(code)
+        if cancelled:
+            logger.info(f"【买入前撤单】{code} 撤销 {cancelled} 笔旧挂单")
+            time.sleep(0.3)
 
         price = self.trader.get_latest_price(code)
         if price is None:
@@ -329,9 +469,15 @@ class XueqiuFollower:
     # ─────────────────────────────────────────────────────────
     def _execute_sell_by_value(self, code: str, sell_amount: float):
         """
-        卖出指定市值的股票
+        卖出指定市值的股票（下单前先撤该股旧挂单）
         sell_amount: 需要减少的市值（元）
         """
+        # 先撤该股票的旧挂单，避免重复或冲突
+        cancelled = self.trader.cancel_orders_for_stock(code)
+        if cancelled:
+            logger.info(f"【卖出前撤单】{code} 撤销 {cancelled} 笔旧挂单")
+            time.sleep(0.3)
+
         positions = self.trader.get_positions()
         pos = positions.get(code)
         if pos is None:

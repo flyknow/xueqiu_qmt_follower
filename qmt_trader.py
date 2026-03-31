@@ -466,6 +466,92 @@ class QMTTrader:
         except Exception as e:
             logger.error(f"全部撤单异常: {e}")
 
+    def get_pending_orders(self, stock_code: Optional[str] = None) -> List[Dict]:
+        """
+        查询未成交（可撤）委托列表
+
+        Args:
+            stock_code: 指定股票代码过滤；None = 返回全部可撤委托
+
+        Returns:
+            [
+              {
+                "order_id":     123456,
+                "stock_code":   "510310.SH",
+                "order_type":   "BUY" | "SELL",
+                "order_volume": 1000,
+                "price":        4.235,
+                "traded_volume":0,
+                "order_remark": "...",
+              },
+              ...
+            ]
+        """
+        if self._mock:
+            return []
+        try:
+            orders = self._trader.query_stock_orders(self._account, cancelable_only=True)
+            if not orders:
+                return []
+            result = []
+            for o in orders:
+                if stock_code and o.stock_code != stock_code:
+                    continue
+                result.append({
+                    "order_id":     o.order_id,
+                    "stock_code":   o.stock_code,
+                    "order_type":   "BUY" if o.order_type == xtconstant.STOCK_BUY else "SELL",
+                    "order_volume": int(o.order_volume),
+                    "traded_volume":int(o.traded_volume),
+                    "price":        float(o.price),
+                    "order_remark": getattr(o, "order_remark", ""),
+                })
+            return result
+        except Exception as e:
+            logger.error(f"查询未成交委托异常: {e}")
+            return []
+
+    def cancel_orders_for_stock(self, stock_code: str) -> int:
+        """
+        撤销指定股票的全部未成交委托
+
+        Args:
+            stock_code: 股票代码
+
+        Returns:
+            成功撤单的数量
+        """
+        orders = self.get_pending_orders(stock_code)
+        if not orders:
+            return 0
+        count = 0
+        for o in orders:
+            logger.info(
+                f"撤单 {stock_code} order_id={o['order_id']} "
+                f"{o['order_type']} {o['order_volume']}股 @ {o['price']:.3f}"
+            )
+            if self.cancel_order(o["order_id"]):
+                count += 1
+            time.sleep(0.05)
+        return count
+
+    def cancel_orders_for_stocks(self, stock_codes: List[str]) -> Dict[str, int]:
+        """
+        批量撤销多只股票的全部未成交委托
+
+        Args:
+            stock_codes: 股票代码列表
+
+        Returns:
+            {stock_code: 撤单数量}
+        """
+        result = {}
+        for code in stock_codes:
+            n = self.cancel_orders_for_stock(code)
+            if n > 0:
+                result[code] = n
+        return result
+
     # ─────────────────────────────────────────────────────────
     # 属性
     # ─────────────────────────────────────────────────────────

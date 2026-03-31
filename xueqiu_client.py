@@ -315,24 +315,42 @@ def _to_qmt_code(raw_code: str) -> str:
     """
     将雪球股票代码转为 miniQMT 格式
 
-    规则：
-      6位数字开头为 0/3 → 深市  xxxxxxx.SZ
-      6位数字开头为 6   → 沪市  xxxxxxx.SH
-      其他港股/ETF 保持原样或添加 .HK
+    处理以下输入格式：
+      SH510310  → 510310.SH   （雪球前缀格式）
+      SZ000001  → 000001.SZ
+      BJ430047  → 430047.BJ
+      HK00700   → 00700.HK
+      600519    → 600519.SH   （纯数字，按首位判断）
+      000858    → 000858.SZ
+      510310.SH → 510310.SH   （已是QMT格式，原样返回）
     """
     code = raw_code.strip().upper()
-    # 已包含后缀
+
+    # 已是 QMT 格式（含 .）→ 原样返回
     if "." in code:
         return code
-    # 纯6位数字
+
+    # 雪球 SH/SZ/BJ/HK 前缀格式 → 转为 数字.后缀
+    if code.startswith("SH") and len(code) == 8:
+        return f"{code[2:]}.SH"
+    if code.startswith("SZ") and len(code) == 8:
+        return f"{code[2:]}.SZ"
+    if code.startswith("BJ") and len(code) == 8:
+        return f"{code[2:]}.BJ"
+    if code.startswith("HK") and len(code) == 7:
+        return f"{code[2:]}.HK"
+
+    # 纯6位数字 → 按首位判断市场
     if code.isdigit() and len(code) == 6:
         if code.startswith("6"):
             return f"{code}.SH"
         elif code.startswith(("0", "3")):
             return f"{code}.SZ"
         elif code.startswith(("8", "4")):
-            return f"{code}.BJ"   # 北交所
-    # 港股：5位数字
+            return f"{code}.BJ"
+
+    # 港股：纯5位数字
     if code.isdigit() and len(code) == 5:
         return f"{code}.HK"
+
     return code
