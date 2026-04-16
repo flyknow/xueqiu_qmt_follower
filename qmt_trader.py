@@ -390,6 +390,21 @@ class QMTTrader:
         return False
 
     # ─────────────────────────────────────────────────────────
+    # 品种辅助
+    # ─────────────────────────────────────────────────────────
+    @staticmethod
+    def get_lot_size(stock_code: str) -> int:
+        """
+        返回品种最小交易单位（手的张/股数）。
+        可转债规则：沪市 11xxxx.SH、深市 12xxxx.SZ → 10张/手
+        其余（A股等）→ 100股/手
+        """
+        prefix = stock_code[:2]
+        if prefix in ("11", "12"):
+            return 10
+        return 100
+
+    # ─────────────────────────────────────────────────────────
     # 计算下单量
     # ─────────────────────────────────────────────────────────
     @staticmethod
@@ -441,7 +456,7 @@ class QMTTrader:
                 logger.error(f"买入失败: 无法获取 {stock_code} 最新价")
                 return -1
 
-        volume = self.calc_buy_volume(amount, price)
+        volume = self.calc_buy_volume(amount, price, min_lot=self.get_lot_size(stock_code))
         if volume <= 0:
             logger.warning(f"买入 {stock_code}: 计算股数为 0（金额={amount:.0f}, 价格={price:.3f}）")
             return -1
@@ -569,9 +584,10 @@ class QMTTrader:
         pos = positions.get(stock_code)
         if not pos:
             return -1
-        # 向下取整到 100 股的整数倍
+        # 向下取整到品种最小交易单位整数倍（股票100，可转债10）
+        lot      = self.get_lot_size(stock_code)
         raw_vol  = pos["can_use_volume"] * ratio
-        sell_vol = int(raw_vol // 100) * 100
+        sell_vol = int(raw_vol // lot) * lot
         if sell_vol <= 0:
             logger.warning(f"减仓 {stock_code}: 计算卖出量为 0（ratio={ratio:.2f}, can_use={pos['can_use_volume']}）")
             return -1

@@ -5,40 +5,42 @@
 # ────────────────────────────────────────────
 # 1. QMT 交易端配置
 # ────────────────────────────────────────────
-QMT_PATH = r"D:\NET\userdata_mini"   # ← 改为你的 QMT 安装路径
-ACCOUNT_ID = "123456"                           # ← 改为你的资金账号
+QMT_PATH = r"C:\xxxxxxx\userdata_mini"   # ← 改为你的 QMT 安装路径
+ACCOUNT_ID = "10107454"                           # ← 改为你的资金账号
 ACCOUNT_TYPE = "STOCK"                              # 普通股票账户
 
 # ────────────────────────────────────────────
 # 2. 雪球组合配置
 # ────────────────────────────────────────────
 # 要跟踪的雪球组合代码（如 ZH123456）
-PORTFOLIO_ID = "ZH123456"                           # ← 改为目标组合 ID
+PORTFOLIO_ID = "ZHxxxxx"                           # ← 改为目标组合 ID
+# PORTFOLIO_ID = "ZH3605259"                           # ← 改为目标组合 ID
 
 # 雪球 Cookie（登录后从浏览器 DevTools → Network → 任意请求 → Request Headers 获取）
 # 必须填写，否则无法访问组合数据
-XUEQIU_COOKIE = "xq_a_token=123456"       # ← 改为你的雪球 Cookie
+XUEQIU_COOKIE = "xq_a_token=xxxxxxxx"       # ← 改为你的雪球 Cookie
 
 # ────────────────────────────────────────────
 # 3. 交易策略配置
 # ────────────────────────────────────────────
 # 跟单模式
-#   "ratio_follow"  : 【推荐】固定总金额 × 雪球权重比例分配，持仓与雪球完全一致
+#   "ratio_follow"  : 【推荐】自动读取账户总资产 × 雪球权重比例，持仓与雪球完全一致
 #   "fixed_amount"  : 每只股票固定金额买入（不按权重）
 TRADE_MODE = "ratio_follow"
 
 # ── ratio_follow 模式专用 ──────────────────────────────────
-# 跟单总资金（元）：按此金额 × 雪球各股权重 计算每只股票目标持仓市值
-# 例如：总金额 10 万，某股权重 30% → 目标市值 3 万
-TOTAL_AMOUNT = 1000.0          # ← 改为你想投入的总金额（元）
-
+# ratio_follow 模式下，跟单基准金额自动从 QMT 账户读取实际总资产（股票市值 + 现金）。
+# 账户总资产 × 雪球各股权重 = 每只股票目标持仓市值，完全与雪球比例对齐。
+# 例如：账户总资产 12 万，某股权重 30% → 目标市值 3.6 万
+#       雪球各股合计 90%（现金 10%） → 目标现金 1.2 万
+TOTAL_AMOUNT = 20000.0
 # 再平衡触发阈值：某只股票实际市值偏离目标市值超过此比例才调整
 # 0.02 = 偏差 2% 以上才下单（避免因行情微波动频繁下单）
 REBALANCE_THRESHOLD = 0.02
 
 # ── fixed_amount 模式专用（ratio_follow 模式下不生效）──────
 # 每笔买入固定金额（元）
-FIXED_AMOUNT = 200.0
+FIXED_AMOUNT = 10000.0
 
 # 是否跟随加仓（仅 fixed_amount 模式生效）
 FOLLOW_INCREASE = True
@@ -63,10 +65,10 @@ ALLOW_AUCTION = False
 # 5. 风控配置
 # ────────────────────────────────────────────
 # 单笔最大下单金额（元），超过则拒绝
-MAX_SINGLE_ORDER_AMOUNT = 600.0
+MAX_SINGLE_ORDER_AMOUNT = 15000.0
 
 # 单日最大交易笔数（买+卖）
-MAX_DAILY_TRADES = 20
+MAX_DAILY_TRADES = 100
 
 # 账户可用资金低于此比例时禁止新建仓（0.05 = 5%）
 MIN_CASH_RATIO = 0.05
@@ -79,3 +81,18 @@ LIMIT_PROTECTION = True
 # ────────────────────────────────────────────
 LOG_DIR = "./logs"
 LOG_LEVEL = "INFO"   # DEBUG / INFO / WARNING / ERROR
+
+# ────────────────────────────────────────────
+# 7. 高级配置（一般无需修改）
+# ────────────────────────────────────────────
+# 非交易时间检测雪球撤单的轮询间隔（秒）
+OFFHOUR_CANCEL_INTERVAL = 300
+
+# 程序状态持久化文件路径（保存 last_rebalancing_id，重启后不重复下单）
+STATE_FILE = "./state.json"
+
+# ── 可选：告警 Webhook（填写后 Cookie 失效等异常会自动推送）──
+# 钉钉机器人 Webhook（留空则不推送）
+DINGTALK_WEBHOOK = "https://oapi.dingtalk.com/robot/send?access_token=sxxxxx"
+# 企业微信机器人 Webhook（留空则不推送）
+WECOM_WEBHOOK = ""

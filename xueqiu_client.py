@@ -48,15 +48,12 @@ def _alert_cookie_expired():
     _last_cookie_alert_ts = now_ts
 
     msg = (
-        "⚠️  【雪球 Cookie 已失效】\n"
-        "   请重新登录雪球，从 DevTools → Network → Request Headers 获取最新 Cookie，\n"
-        "   更新到 config.py 的 XUEQIU_COOKIE 后重启程序。\n"
-        "   在 Cookie 更新前，跟单功能将无法正常工作！"
+        "雪球Token已失效"
     )
     logger.critical(msg)
 
     # ── 可选：钉钉告警（填写 webhook 后取消注释）──────────────
-    # _send_dingtalk(msg)
+    _send_dingtalk(msg)
 
     # ── 可选：企业微信机器人（填写 webhook 后取消注释）──────────
     # _send_wecom(msg)

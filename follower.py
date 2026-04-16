@@ -426,7 +426,10 @@ class XueqiuFollower:
                     cancel_ids.append(o["order_id"])
             elif o["order_type"] == "SELL":
                 # 卖单：若目标已不需要卖（目标>=当前），则撤
-                if target_value >= cur_value and target_w > 0:
+                # 注意：target_w > 0 不应作为前提条件；
+                # 即使 target_w==0（完全清仓），若持仓已全卖完（cur_value==0），
+                # 继续挂着也无意义，同样需要撤单
+                if target_value >= cur_value:
                     logger.info(
                         f"【撤单同步】{code} 卖单已无需执行"
                         f"（目标市值={target_value:.0f} >= 当前市值={cur_value:.0f}），撤单 order_id={o['order_id']}"
@@ -584,6 +587,10 @@ class XueqiuFollower:
             tgt = target.get(code, 0.0)
             cur = current_value.get(code, 0.0)
             diff = tgt - cur
+
+            # tgt==0 说明该股已从组合移除，交由下方清仓专项循环处理，此处跳过
+            if tgt == 0:
+                continue
 
             # 忽略微小偏差
             if tgt > 0 and abs(diff) / tgt < threshold:
@@ -779,8 +786,9 @@ class XueqiuFollower:
             logger.warning(f"【风控-跌停】{code} 当前已跌停，跳过卖出（等下个交易日）")
             return "skip"
 
-        # 按目标差值计算应卖出股数（向下取整到 100 股整数倍）
-        sell_volume = int(sell_amount / price // 100) * 100
+        # 按目标差值计算应卖出股数（向下取整到品种最小交易单位整数倍）
+        lot = self.trader.get_lot_size(code)
+        sell_volume = int(sell_amount / price // lot) * lot
 
         if sell_volume >= can_use:
             # 超出或等于可用量 → 全部清仓
@@ -789,12 +797,12 @@ class XueqiuFollower:
                 f"【按比例卖出】{code}  全部卖出 {sell_volume}股 @ {price:.3f}"
                 f"  目标减少≈¥{sell_amount:,.0f}（超出/等于可用持仓，清仓）"
             )
-        elif sell_volume < 100:
-            # 不足一手 → 全部清仓，避免碎股残留无法跟紧组合
-            sell_volume = can_use
+        elif sell_volume < lot:
+            # 不足一手 → 取1手，若持仓本身不足一手则全部卖出
+            sell_volume = min(lot, can_use)
             logger.info(
-                f"【按比例卖出】{code}  不足一手，改为全部清仓 {sell_volume}股 @ {price:.3f}"
-                f"  目标减少≈¥{sell_amount:,.0f}（持仓过小，清仓以跟紧组合）"
+                f"【按比例卖出】{code}  比例不足一手({lot}张/股)，取1手 {sell_volume}股 @ {price:.3f}"
+                f"  目标减少≈¥{sell_amount:,.0f}"
             )
         else:
             logger.info(
@@ -890,12 +898,15 @@ class XueqiuFollower:
                 if config.LIMIT_PROTECTION and self.trader.is_limit_up(code):
                     logger.warning(f"【追单-风控】{code} 已涨停，放弃重下买入")
                     continue
-                volume = self.trader.calc_buy_volume(amount, new_price)
-                if volume <= 0:
+                # 预估股数仅用于日志，实际下单以 amount 为准（trader.buy 内部换算）
+                est_volume = self.trader.calc_buy_volume(
+                    amount, new_price, min_lot=self.trader.get_lot_size(code)
+                )
+                if est_volume <= 0:
                     logger.warning(f"【追单】{code} 计算买入股数为0，放弃重下")
                     continue
                 logger.info(
-                    f"【追单-重下买入】{code} {volume}股 @ {new_price:.3f} "
+                    f"【追单-重下买入】{code} 约{est_volume}股 @ {new_price:.3f} "
                     f"（目标金额≈¥{amount:,.0f}）"
                 )
                 new_oid = self.trader.buy(
@@ -904,6 +915,7 @@ class XueqiuFollower:
                     price=new_price,
                     remark=f"雪球追单买入-{config.PORTFOLIO_ID}",
                 )
+                chase_volume = est_volume
             else:  # SELL
                 volume = info["volume"]
                 # 检查可用持仓（持仓可能因部分成交而减少）
@@ -927,13 +939,14 @@ class XueqiuFollower:
                     price=new_price,
                     remark=f"雪球追单卖出-{config.PORTFOLIO_ID}",
                 )
+                chase_volume = volume   # SELL 记录原始目标量
 
             if new_oid is not None and new_oid > 0:
                 to_add[new_oid] = {
                     "stock_code": code,
                     "direction":  direction,
                     "amount":     info["amount"],
-                    "volume":     volume,
+                    "volume":     chase_volume,
                     "ts":         time.time(),
                 }
                 logger.info(f"【追单】{code} 新委托 order_id={new_oid}")
